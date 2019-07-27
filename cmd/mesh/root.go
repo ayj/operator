@@ -18,6 +18,7 @@ import (
 	"flag"
 
 	"github.com/spf13/cobra"
+	"istio.io/operator/cmd/iop/multi"
 
 	"istio.io/pkg/version"
 )
@@ -66,6 +67,8 @@ func GetRootCmd(args []string) *cobra.Command {
 	rootCmd.AddCommand(mc)
 	rootCmd.AddCommand(pc)
 	rootCmd.AddCommand(version.CobraCommand())
+
+	rootCmd.AddCommand(multi.GetCommand())
 
 	return rootCmd
 }
