@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -215,15 +216,17 @@ func GetJoinCommand(args *args) *cobra.Command {
 				log.Fatal(err)
 			}
 
-			cargs := strings.Split(fmt.Sprintf("kubectl --context=%v get namespace -o jsonpath='{.items[*].metadata.name}'", args.clusters[1]), " ")
+			cargs := strings.Split(fmt.Sprintf("kubectl --context=%v get namespace -o jsonpath={.items[*].metadata.name}", args.clusters[1]), " ")
 			out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("%v: %v", err, string(out))
 			}
 
+			fmt.Println("NS", string(out))
+
 			// TODO - this should delete *all* Istio secrets
 			namespaces := strings.Split(string(out), " ")
-			fmt.Println("NS", namespaces)
+
 			for _, namespace := range namespaces {
 				args := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v delete secret istio.default", namespace, args.clusters[1]), " ")
 				exec.Command(args[0], args[1:]...).CombinedOutput()
@@ -259,10 +262,9 @@ func GetJoinCommand(args *args) *cobra.Command {
 				log.Fatal(err)
 			}
 
-			patch := "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"date\":\"`date +'%s'`\"}}}}}"
+			patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"date":"%v"}}}}}`, time.Now().UTC().Format(time.RFC3339))
 
 			for _, namespace := range namespaces {
-				fmt.Println("NAMESPACE", namespace)
 				switch namespace {
 				case "kube-system", "kube-public":
 				default:
@@ -271,9 +273,12 @@ func GetJoinCommand(args *args) *cobra.Command {
 					if err != nil {
 						log.Fatalf("%v: %v", err, string(out))
 					}
+					fmt.Println(string(out))
 					for _, deployment := range strings.Split(string(out), "\n") {
-						fmt.Println("DEPLOYMENT", deployment)
-						cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v patch %v -p %v", args.clusters[1], namespace, deployment, patch), " ")
+						if deployment == "" {
+							continue
+						}
+						cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v patch %v -p %s", args.clusters[1], namespace, deployment, patch), " ")
 						fmt.Println(cargs)
 						out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
 						if err != nil {
