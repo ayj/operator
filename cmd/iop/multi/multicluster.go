@@ -273,7 +273,6 @@ func GetJoinCommand(args *args) *cobra.Command {
 					if err != nil {
 						log.Fatalf("%v: %v", err, string(out))
 					}
-					fmt.Println(string(out))
 					for _, deployment := range strings.Split(string(out), "\n") {
 						if deployment == "" {
 							continue
@@ -309,22 +308,6 @@ func GetJoinCommand(args *args) *cobra.Command {
 					}
 				}
 			}
-
-			// 	for ns in `$KUBECTL get ns -o=jsonpath="{.items[*].metadata.name}"`; do
-			// 	if [[ ! $ns =~ ^namespace/kube- ]]; then
-			// 	  for depl in `$KUBECTL -n $ns get deployment -o=name`; do
-			// 		$KUBECTL -n $ns patch $depl -p ""
-			// 	  done
-			// 	fi
-			//   done
-
-			//   for ns in `$KUBECTL get ns -o=jsonpath="{.items[*].metadata.name}"`; do
-			// 	if [[ ! $ns =~ ^namespace/kube- ]]; then
-			// 	  for depl in `$KUBECTL -n $ns get deployment -o=name`; do
-			// 		$KUBECTL -n $ns rollout status $depl || true
-			// 	  done
-			// 	fi
-			// done
 
 			return nil
 		},
