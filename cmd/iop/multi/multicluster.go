@@ -279,7 +279,28 @@ func GetJoinCommand(args *args) *cobra.Command {
 							continue
 						}
 						cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v patch %v -p %s", args.clusters[1], namespace, deployment, patch), " ")
-						fmt.Println(cargs)
+						out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+						if err != nil {
+							log.Fatalf("%v: %v", err, string(out))
+						}
+					}
+				}
+			}
+
+			for _, namespace := range namespaces {
+				switch namespace {
+				case "kube-system", "kube-public":
+				default:
+					cargs := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v get deployment -o=name", args.clusters[1], namespace), " ")
+					out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+					if err != nil {
+						log.Fatalf("%v: %v", err, string(out))
+					}
+					for _, deployment := range strings.Split(string(out), "\n") {
+						if deployment == "" {
+							continue
+						}
+						cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v rollout status %v", args.clusters[1], namespace, deployment), " ")
 						out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
 						if err != nil {
 							log.Fatalf("%v: %v", err, string(out))
