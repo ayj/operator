@@ -212,8 +212,9 @@ func GetJoinCommand(args *args) *cobra.Command {
 
 				return nil
 			}
+			// remove existing self-signed and externally provided certs
 			if err := deleteSecret("istio-system", "istio-ca-secret"); err != nil {
-				log.Fatal(err)
+				log.Print(err)
 			}
 
 			cargs := strings.Split(fmt.Sprintf("kubectl --context=%v get namespace -o jsonpath={.items[*].metadata.name}", args.clusters[1]), " ")
@@ -232,27 +233,32 @@ func GetJoinCommand(args *args) *cobra.Command {
 				exec.Command(args[0], args[1:]...).CombinedOutput()
 			}
 
-			cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system get secret istio-ca-secret -o yaml --export", args.clusters[0]), " ")
-			out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%v: %v", err, string(out))
-			}
+			fmt.Println("copy secrets to joined cluster")
+			// TODO source cluster may have self-signed or plugged cert. We need to copy one or the other (but not both) to joined cluster.
+			for _, secret := range []string{"istio-ca-secret", "cacerts"} {
+				cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system get secret %v -o yaml --export", args.clusters[0], secret), " ")
+				out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+				if err != nil {
+					log.Printf("%v: %v\n", err, string(out))
+					continue
+				}
 
-			t, err := ioutil.TempFile("", "")
-			if err != nil {
-				log.Fatal(err)
-			}
-			_, err = t.Write(out)
-			if err != nil {
-				log.Fatal(err)
-			}
-			t.Close()
+				t, err := ioutil.TempFile("", "")
+				if err != nil {
+					log.Fatal(err)
+				}
+				_, err = t.Write(out)
+				if err != nil {
+					log.Fatal(err)
+				}
+				t.Close()
 
-			fmt.Println("saved to ", t.Name())
-			cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system apply -f %v --validate=false", args.clusters[1], t.Name()), " ")
-			out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%v: %v", err, string(out))
+				fmt.Println("saved to ", t.Name())
+				cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system apply -f %v --validate=false", args.clusters[1], t.Name()), " ")
+				out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+				if err != nil {
+					return fmt.Errorf("%v: %v", err, string(out))
+				}
 			}
 
 			if err := scale(1); err != nil {
