@@ -15,6 +15,7 @@
 package multi
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -26,9 +27,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd/api"
 )
 
 func BuildClientConfig(kubeconfig, context string) clientcmd.ClientConfig {
@@ -96,6 +99,27 @@ func GetListCommand(args *args) *cobra.Command {
 	return cmd
 }
 
+const pilotSecretTemplate = `
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: ${CA_DATA}
+    server: ${SERVER}
+  name: ${CLUSTER_NAME}
+contexts:
+- context:
+    cluster: ${CLUSTER_NAME}
+    user: ${CLUSTER_NAME}
+  name: ${CLUSTER_NAME}
+current-context: ${CLUSTER_NAME}
+preferences: {}
+users:
+- name: ${CLUSTER_NAME}
+  user:
+    token: ${TOKEN}
+`
+
 func GetJoinCommand(args *args) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "join",
@@ -107,210 +131,310 @@ func GetJoinCommand(args *args) *cobra.Command {
 				return err
 			}
 
-			// TODO - join to clusters first
+			if false {
 
-			if len(args.clusters) != 2 {
-				cmd.Printf("only two clusters supported - %v clusters specified\n", len(args.clusters))
-				os.Exit(1)
-			}
+				// TODO - join to clusters first
 
-			csm := make(map[string]*kubernetes.Clientset, len(args.clusters))
-
-			var notFound bool
-			for _, cluster := range args.clusters {
-				if _, ok := config.Contexts[cluster]; !ok {
-					cmd.Printf("cluster %q configuration not found\n", cluster)
-					notFound = true
-					continue
+				if len(args.clusters) != 2 {
+					cmd.Printf("only two clusters supported - %v clusters specified\n", len(args.clusters))
+					os.Exit(1)
 				}
 
-				rest, err := BuildClientConfig(args.kubeconfig, cluster).ClientConfig()
-				if err != nil {
-					cmd.Printf("could not build client for cluster %q: %v\n", cluster, err)
-					notFound = true
-					continue
+				csm := make(map[string]*kubernetes.Clientset, len(args.clusters))
+
+				var notFound bool
+				for _, cluster := range args.clusters {
+					if _, ok := config.Contexts[cluster]; !ok {
+						cmd.Printf("cluster %q configuration not found\n", cluster)
+						notFound = true
+						continue
+					}
+
+					rest, err := BuildClientConfig(args.kubeconfig, cluster).ClientConfig()
+					if err != nil {
+						cmd.Printf("could not build client for cluster %q: %v\n", cluster, err)
+						notFound = true
+						continue
+					}
+
+					cs, err := kubernetes.NewForConfig(rest)
+					if err != nil {
+						cmd.Printf("could not create clientset for cluster %q: %v\n", cluster, err)
+						notFound = true
+						continue
+					}
+
+					if _, err = cs.CoreV1().Namespaces().Get("istio-system", metav1.GetOptions{}); err != nil {
+						// TODO - use errors.IsNotFound
+						cmd.Printf("could not find istio-system namespace in cluster %q: %v\n", cluster, err)
+						notFound = true
+						continue
+					}
+					cmd.Printf("found istio-system for cluster %v\n", cluster)
+
+					csm[cluster] = cs
 				}
 
-				cs, err := kubernetes.NewForConfig(rest)
-				if err != nil {
-					cmd.Printf("could not create clientset for cluster %q: %v\n", cluster, err)
-					notFound = true
-					continue
+				if notFound {
+					os.Exit(1)
 				}
 
-				if _, err = cs.CoreV1().Namespaces().Get("istio-system", metav1.GetOptions{}); err != nil {
-					// TODO - use errors.IsNotFound
-					cmd.Printf("could not find istio-system namespace in cluster %q: %v\n", cluster, err)
-					notFound = true
-					continue
+				// c0 := csm[args.clusters[0]]
+				// c1 := csm[args.clusters[1]]
+
+				// FLAT_NETWORK
+
+				// - CONTROL_PLANE
+				scale := func(replicas int) error {
+					args := []string{
+						"kubectl",
+						fmt.Sprintf("--context=%v", args.clusters[1]),
+						"scale",
+						"deployment",
+						"-n",
+						"istio-system",
+						"istio-citadel",
+						"--replicas",
+						strconv.Itoa(replicas),
+					}
+					if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+						return fmt.Errorf("%v: %v", err, string(out))
+					}
+					return nil
 				}
-				cmd.Printf("found istio-system for cluster %v\n", cluster)
-
-				csm[cluster] = cs
-			}
-
-			if notFound {
-				os.Exit(1)
-			}
-
-			// c0 := csm[args.clusters[0]]
-			// c1 := csm[args.clusters[1]]
-
-			// FLAT_NETWORK
-
-			// - CONTROL_PLANE
-			scale := func(replicas int) error {
-				args := []string{
-					"kubectl",
-					fmt.Sprintf("--context=%v", args.clusters[1]),
-					"scale",
-					"deployment",
-					"-n",
-					"istio-system",
-					"istio-citadel",
-					"--replicas",
-					strconv.Itoa(replicas),
-				}
-				if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
-					return fmt.Errorf("%v: %v", err, string(out))
-				}
-				return nil
-			}
-			wait := func() error {
-				args := []string{
-					"kubectl",
-					fmt.Sprintf("--context=%v", args.clusters[1]),
-					"rollout",
-					"status",
-					"deployment",
-					"-n",
-					"istio-system",
-					"istio-citadel",
-				}
-				if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
-					return fmt.Errorf("%v: %v", err, string(out))
-				}
-				return nil
-			}
-
-			if err := scale(0); err != nil {
-				log.Fatal(err)
-			}
-			if err := wait(); err != nil {
-				log.Fatal(err)
-			}
-
-			// $KUBECTL_DST -n istio-system delete secret istio-ca-secret || true
-			deleteSecret := func(namespace, secret string) error {
-				args := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v delete secret %v", args.clusters[1], namespace, secret), " ")
-				fmt.Println(args)
-				if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
-					return fmt.Errorf("%v: %v", err, string(out))
-				} else {
-					fmt.Println(string(out))
+				wait := func() error {
+					args := []string{
+						"kubectl",
+						fmt.Sprintf("--context=%v", args.clusters[1]),
+						"rollout",
+						"status",
+						"deployment",
+						"-n",
+						"istio-system",
+						"istio-citadel",
+					}
+					if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+						return fmt.Errorf("%v: %v", err, string(out))
+					}
+					return nil
 				}
 
-				return nil
-			}
-			// remove existing self-signed and externally provided certs
-			if err := deleteSecret("istio-system", "istio-ca-secret"); err != nil {
-				log.Print(err)
-			}
-
-			cargs := strings.Split(fmt.Sprintf("kubectl --context=%v get namespace -o jsonpath={.items[*].metadata.name}", args.clusters[1]), " ")
-			out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%v: %v", err, string(out))
-			}
-
-			fmt.Println("NS", string(out))
-
-			// TODO - this should delete *all* Istio secrets
-			namespaces := strings.Split(string(out), " ")
-
-			for _, namespace := range namespaces {
-				args := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v delete secret istio.default", namespace, args.clusters[1]), " ")
-				exec.Command(args[0], args[1:]...).CombinedOutput()
-			}
-
-			fmt.Println("copy secrets to joined cluster")
-			// TODO source cluster may have self-signed or plugged cert. We need to copy one or the other (but not both) to joined cluster.
-			for _, secret := range []string{"istio-ca-secret", "cacerts"} {
-				cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system get secret %v -o yaml --export", args.clusters[0], secret), " ")
-				out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-				if err != nil {
-					log.Printf("%v: %v\n", err, string(out))
-					continue
-				}
-
-				t, err := ioutil.TempFile("", "")
-				if err != nil {
+				if err := scale(0); err != nil {
 					log.Fatal(err)
 				}
-				_, err = t.Write(out)
-				if err != nil {
+				if err := wait(); err != nil {
 					log.Fatal(err)
 				}
-				t.Close()
 
-				fmt.Println("saved to ", t.Name())
-				cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system apply -f %v --validate=false", args.clusters[1], t.Name()), " ")
-				out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-				if err != nil {
-					return fmt.Errorf("%v: %v", err, string(out))
-				}
-			}
-
-			if err := scale(1); err != nil {
-				log.Fatal(err)
-			}
-			if err := wait(); err != nil {
-				log.Fatal(err)
-			}
-
-			patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"date":"%v"}}}}}`, time.Now().UTC().Format(time.RFC3339))
-
-			for _, namespace := range namespaces {
-				switch namespace {
-				case "kube-system", "kube-public":
-				default:
-					cargs := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v get deployment -o=name", args.clusters[1], namespace), " ")
-					out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-					if err != nil {
-						log.Fatalf("%v: %v", err, string(out))
-					}
-					for _, deployment := range strings.Split(string(out), "\n") {
-						if deployment == "" {
-							continue
-						}
-						cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v patch %v -p %s", args.clusters[1], namespace, deployment, patch), " ")
-						out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-						if err != nil {
-							log.Fatalf("%v: %v", err, string(out))
-						}
-					}
-				}
-			}
-
-			for _, namespace := range namespaces {
-				switch namespace {
-				case "kube-system", "kube-public":
-				default:
-					cargs := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v get deployment -o=name", args.clusters[1], namespace), " ")
-					out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-					if err != nil {
-						log.Fatalf("%v: %v", err, string(out))
-					}
-					for _, deployment := range strings.Split(string(out), "\n") {
-						if deployment == "" {
-							continue
-						}
-						cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v rollout status %v", args.clusters[1], namespace, deployment), " ")
-						out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
-						if err != nil {
-							log.Fatalf("%v: %v", err, string(out))
-						}
+				// $KUBECTL_DST -n istio-system delete secret istio-ca-secret || true
+				deleteSecret := func(namespace, secret string) error {
+					args := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v delete secret %v", args.clusters[1], namespace, secret), " ")
+					fmt.Println(args)
+					if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+						return fmt.Errorf("%v: %v", err, string(out))
+					} else {
 						fmt.Println(string(out))
+					}
+
+					return nil
+				}
+				// remove existing self-signed and externally provided certs
+				if err := deleteSecret("istio-system", "istio-ca-secret"); err != nil {
+					log.Print(err)
+				}
+
+				cargs := strings.Split(fmt.Sprintf("kubectl --context=%v get namespace -o jsonpath={.items[*].metadata.name}", args.clusters[1]), " ")
+				out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+				if err != nil {
+					return fmt.Errorf("%v: %v", err, string(out))
+				}
+
+				fmt.Println("NS", string(out))
+
+				// TODO - this should delete *all* Istio secrets
+				namespaces := strings.Split(string(out), " ")
+
+				for _, namespace := range namespaces {
+					args := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v delete secret istio.default", namespace, args.clusters[1]), " ")
+					exec.Command(args[0], args[1:]...).CombinedOutput()
+				}
+
+				fmt.Println("copy secrets to joined cluster")
+				// TODO source cluster may have self-signed or plugged cert. We need to copy one or the other (but not both) to joined cluster.
+				for _, secret := range []string{"istio-ca-secret", "cacerts"} {
+					cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system get secret %v -o yaml --export", args.clusters[0], secret), " ")
+					out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+					if err != nil {
+						log.Printf("%v: %v\n", err, string(out))
+						continue
+					}
+
+					t, err := ioutil.TempFile("", "")
+					if err != nil {
+						log.Fatal(err)
+					}
+					_, err = t.Write(out)
+					if err != nil {
+						log.Fatal(err)
+					}
+					t.Close()
+
+					fmt.Println("saved to ", t.Name())
+					cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n istio-system apply -f %v --validate=false", args.clusters[1], t.Name()), " ")
+					out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+					if err != nil {
+						return fmt.Errorf("%v: %v", err, string(out))
+					}
+				}
+
+				if err := scale(1); err != nil {
+					log.Fatal(err)
+				}
+				if err := wait(); err != nil {
+					log.Fatal(err)
+				}
+
+				patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"date":"%v"}}}}}`, time.Now().UTC().Format(time.RFC3339))
+
+				for _, namespace := range namespaces {
+					switch namespace {
+					case "kube-system", "kube-public":
+					default:
+						cargs := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v get deployment -o=name", args.clusters[1], namespace), " ")
+						out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+						if err != nil {
+							log.Fatalf("%v: %v", err, string(out))
+						}
+						for _, deployment := range strings.Split(string(out), "\n") {
+							if deployment == "" {
+								continue
+							}
+							cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v patch %v -p %s", args.clusters[1], namespace, deployment, patch), " ")
+							out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+							if err != nil {
+								log.Fatalf("%v: %v", err, string(out))
+							}
+						}
+					}
+				}
+
+				for _, namespace := range namespaces {
+					switch namespace {
+					case "kube-system", "kube-public":
+					default:
+						cargs := strings.Split(fmt.Sprintf("kubectl --context=%v -n %v get deployment -o=name", args.clusters[1], namespace), " ")
+						out, err := exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+						if err != nil {
+							log.Fatalf("%v: %v", err, string(out))
+						}
+						for _, deployment := range strings.Split(string(out), "\n") {
+							if deployment == "" {
+								continue
+							}
+							cargs = strings.Split(fmt.Sprintf("kubectl --context=%v -n %v rollout status %v", args.clusters[1], namespace, deployment), " ")
+							out, err = exec.Command(cargs[0], cargs[1:]...).CombinedOutput()
+							if err != nil {
+								log.Fatalf("%v: %v", err, string(out))
+							}
+							fmt.Println(string(out))
+						}
+					}
+				}
+			}
+			// create k8s secret with c0 pilot SA kubeconfig, label, and copy to c1
+			// create k8s secret with c1 pilot SA kubeconfig, label, and copy to c0
+			config, err := args.config.ConfigAccess().GetStartingConfig()
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			// TODO - multiple kubeconfig context may point to the same cluster.
+			for _, dst := range args.clusters {
+				for _, src := range args.clusters {
+					// skip self
+					if src == dst {
+						continue
+					}
+					fmt.Printf("joining %v to %v\n", src, dst)
+
+					// local CLUSTER_NAME=$($KUBECTL_SLAVE config view -o jsonpath="{.contexts[?(@.name == \"${KUBECONTEXT_SLAVE}\")].context.cluster}")
+					clusterName := config.Contexts[dst].Cluster
+
+					// local SERVER=$($KUBECTL_SLAVE config view -o jsonpath="{.clusters[?(@.name == \"${CLUSTER_NAME}\")].cluster.server}")
+					server := config.Clusters[dst].Server
+
+					// local NAMESPACE=istio-system
+					namespace := "istio-system"
+
+					// local SERVICE_ACCOUNT=istio-pilot-service-account
+					serviceAccountName := "istio-pilot-service-account"
+
+					srcRest, err := BuildClientConfig(args.kubeconfig, args.context).ClientConfig()
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					srcKube, err := kubernetes.NewForConfig(srcRest)
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					// local SECRET_NAME=$($KUBECTL_SLAVE get sa ${SERVICE_ACCOUNT} -n ${NAMESPACE} -o jsonpath="{.secrets[].name}")
+					serviceAccount, err := srcKube.Core().ServiceAccounts(namespace).Get(serviceAccountName, metav1.GetOptions{})
+					if err != nil {
+						log.Fatal(err)
+					}
+					if len(serviceAccount.Secrets) != 1 {
+						log.Fatal(err)
+					}
+					secretName := serviceAccount.Secrets[0].Name
+
+					// local CA_DATA=$($KUBECTL_SLAVE get secret ${SECRET_NAME} -n ${NAMESPACE} -o jsonpath="{.data['ca\.crt']}")
+					pilotSecret, err := srcKube.Core().Secrets(namespace).Get(secretName, metav1.GetOptions{})
+					if err != nil {
+						log.Fatal(err)
+					}
+					caData, ok := pilotSecret.Data["ca.crt"]
+					if !ok {
+						log.Fatalf("%v is missing ca.crt", secretName)
+					}
+
+					// local TOKEN=$($KUBECTL_SLAVE get secret ${SECRET_NAME} -n ${NAMESPACE} -o jsonpath="{.data['token']}" | base64 --decode)
+					token, ok := pilotSecret.Data["token"]
+					if !ok {
+						log.Fatalf("%v is missing token", secretName)
+					}
+
+					decodedToken := make([]byte, base64.StdEncoding.DecodedLen(len(token)))
+					_, err := base64.StdEncoding.Decode(decodedToken, token)
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					sc := api.NewConfig()
+					sc.Kind = "Config"
+					sc.APIVersion = "v1"
+					sc.Clusters[clusterName] = &api.Cluster{
+						CertificateAuthorityData: caData,
+						Server:                   server,
+					}
+					sc.Contexts[clusterName] = &api.Context{
+						Cluster:  clusterName,
+						AuthInfo: clusterName,
+					}
+					sc.CurrentContext = clusterName
+					sc.AuthInfos[clusterName] = &api.AuthInfo{
+						Token: string(decodedToken),
+					}
+
+					srcSecret := v1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      fmt.Sprintf("istio-mc-%v", src),
+							Namespace: namespace,
+							Labels: map[string]string{
+								"istio/multiCluster": "true",
+							},
+						},
 					}
 				}
 			}
