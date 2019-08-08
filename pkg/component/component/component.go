@@ -548,6 +548,7 @@ func renderManifest(c *CommonComponentFields) (string, error) {
 		log.Errorf("Error in OverlayK8sSettings: %s", err)
 		return "", err
 	}
+	my = "# Resources for " + string(c.name) + " component\n\n" + my
 	log.Infof("Manifest after k8s API settings:\n%s\n", my)
 
 	// Add the k8s resource overlays from IstioControlPlaneSpec.
@@ -613,7 +614,7 @@ func createHelmRenderer(c *CommonComponentFields) (helm.TemplateRenderer, error)
 	if err != nil {
 		return nil, err
 	}
-	return helm.NewHelmRenderer(icp.InstallPackagePath+"/"+c.Translator.ComponentMaps[c.name].HelmSubdir,
+	return helm.NewHelmRenderer(icp.InstallPackagePath, c.Translator.ComponentMaps[c.name].HelmSubdir,
 		icp.Profile, string(c.name), ns)
 }
 

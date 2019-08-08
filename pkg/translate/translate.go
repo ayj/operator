@@ -87,9 +87,9 @@ type Translation struct {
 }
 
 var (
-	// Translators is a map of minor versions to Translator for that version.
+	// translators is a map of minor versions to Translator for that version.
 	// TODO: this should probably be moved out to a config file that's versioned.
-	Translators = map[version.MinorVersion]*Translator{
+	translators = map[version.MinorVersion]*Translator{
 		version.NewMinorVersion(1, 3): {
 			APIMapping: map[string]*Translation{
 				"Hub":              {"global.hub", nil},
@@ -99,6 +99,8 @@ var (
 
 				"TrafficManagement.Components.Proxy.Common.Values": {"global.proxy", nil},
 
+				"ConfigManagement.Components.Namespace": {"global.configNamespace", nil},
+
 				"Policy.PolicyCheckFailOpen":       {"global.policyCheckFailOpen", nil},
 				"Policy.OutboundTrafficPolicyMode": {"global.outboundTrafficPolicy.mode", nil},
 				"Policy.Components.Namespace":      {"global.policyNamespace", nil},
@@ -107,19 +109,53 @@ var (
 
 				"Security.ControlPlaneMtls.Value":    {"global.controlPlaneSecurityEnabled", nil},
 				"Security.DataPlaneMtlsStrict.Value": {"global.mtls.enabled", nil},
+				"Security.Components.Namespace":      {"global.securityNamespace", nil},
 			},
 			KubernetesMapping: map[string]*Translation{
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.Affinity":            {"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].affinity", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.Env":                 {"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].env", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.HpaSpec":             {"[HorizontalPodAutoscaler:{{.ResourceName}}].spec", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.ImagePullPolicy":     {"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].imagePullPolicy", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.NodeSelector":        {"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].nodeSelector", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.PodDisruptionBudget": {"[PodDisruptionBudget:{{.ResourceName}}].spec", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.PodAnnotations":      {"[Deployment:{{.ResourceName}}].spec.template.metadata.annotations", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.PriorityClassName":   {"[Deployment:{{.ResourceName}}].spec.template.spec.priorityClassName.", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.ReadinessProbe":      {"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].readinessProbe", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.ReplicaCount":        {"[Deployment:{{.ResourceName}}].spec.replicas", nil},
-				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.Resources":           {"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].resources", nil},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.Affinity": {
+					"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].affinity",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.Env": {
+					"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].env",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.HpaSpec": {
+					"[HorizontalPodAutoscaler:{{.ResourceName}}].spec",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.ImagePullPolicy": {
+					"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].imagePullPolicy",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.NodeSelector": {
+					"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].nodeSelector",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.PodDisruptionBudget": {
+					"[PodDisruptionBudget:{{.ResourceName}}].spec",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.PodAnnotations": {
+					"[Deployment:{{.ResourceName}}].spec.template.metadata.annotations",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.PriorityClassName": {
+					"[Deployment:{{.ResourceName}}].spec.template.spec.priorityClassName.",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.ReadinessProbe": {
+					"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].readinessProbe",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.ReplicaCount": {
+					"[Deployment:{{.ResourceName}}].spec.replicas",
+					nil,
+				},
+				"{{.FeatureName}}.Components.{{.ComponentName}}.Common.K8S.Resources": {
+					"[Deployment:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].resources",
+					nil,
+				},
 			},
 			ToFeature: map[name.ComponentName]name.FeatureName{
 				name.IstioBaseComponentName:       name.IstioBaseFeatureName,
@@ -208,7 +244,7 @@ var (
 
 // NewTranslator creates a new Translator for minorVersion and returns a ptr to it.
 func NewTranslator(minorVersion version.MinorVersion) (*Translator, error) {
-	t := Translators[minorVersion]
+	t := translators[minorVersion]
 	if t == nil {
 		return nil, fmt.Errorf("no translator available for version %s", minorVersion)
 	}
@@ -233,7 +269,10 @@ func (t *Translator) OverlayK8sSettings(yml string, icp *v1alpha2.IstioControlPl
 	// om is a map of kind:name string to Object ptr.
 	om := objects.ToNameKindMap()
 	for inPath, v := range t.KubernetesMapping {
-		inPath = renderFeatureComponentPathTemplate(inPath, t.ToFeature[componentName], componentName)
+		inPath, err := renderFeatureComponentPathTemplate(inPath, t.ToFeature[componentName], componentName)
+		if err != nil {
+			return "", err
+		}
 		log.Infof("Checking for path %s in IstioControlPlaneSpec", inPath)
 		m, found, err := name.GetFromStructPath(icp, inPath)
 		if err != nil {
@@ -257,7 +296,10 @@ func (t *Translator) OverlayK8sSettings(yml string, icp *v1alpha2.IstioControlPl
 		if err != nil {
 			return "", err
 		}
-		outPath := t.renderResourceComponentPathTemplate(v.outPath, componentName)
+		outPath, err := t.renderResourceComponentPathTemplate(v.outPath, componentName)
+		if err != nil {
+			return "", err
+		}
 		log.Infof("path has value in IstioControlPlaneSpec, mapping to output path %s", outPath)
 		path := util.PathFromString(outPath)
 		pe := path[0]
@@ -290,7 +332,7 @@ func (t *Translator) OverlayK8sSettings(yml string, icp *v1alpha2.IstioControlPl
 		*(om[pe]) = *mergedObj
 	}
 
-	return objects.YAML()
+	return objects.YAMLManifest()
 }
 
 // overlayK8s overlays overlayYAML over baseYAML at the given path in baseYAML.
@@ -504,7 +546,7 @@ func getValuesPathMapping(mappings map[string]*Translation, path util.Path) (str
 
 // renderFeatureComponentPathTemplate renders a template of the form <path>{{.FeatureName}}<path>{{.ComponentName}}<path> with
 // the supplied parameters.
-func renderFeatureComponentPathTemplate(tmpl string, featureName name.FeatureName, componentName name.ComponentName) string {
+func renderFeatureComponentPathTemplate(tmpl string, featureName name.FeatureName, componentName name.ComponentName) (string, error) {
 	type Temp struct {
 		FeatureName   name.FeatureName
 		ComponentName name.ComponentName
@@ -513,23 +555,12 @@ func renderFeatureComponentPathTemplate(tmpl string, featureName name.FeatureNam
 		FeatureName:   featureName,
 		ComponentName: componentName,
 	}
-	t, err := template.New("").Parse(tmpl)
-	if err != nil {
-		log.Errorf("Failed to create template object, Error: %v. Template string: \n%s\n", err.Error(), tmpl)
-		return err.Error()
-	}
-	buf := new(bytes.Buffer)
-	err = t.Execute(buf, ts)
-	if err != nil {
-		log.Errorf("Failed to execute template: %v", err.Error())
-		return err.Error()
-	}
-	return buf.String()
+	return renderTemplate(tmpl, ts)
 }
 
 // renderResourceComponentPathTemplate renders a template of the form <path>{{.ResourceName}}<path>{{.ContainerName}}<path> with
 // the supplied parameters.
-func (t *Translator) renderResourceComponentPathTemplate(tmpl string, componentName name.ComponentName) string {
+func (t *Translator) renderResourceComponentPathTemplate(tmpl string, componentName name.ComponentName) (string, error) {
 	ts := struct {
 		ResourceName  string
 		ContainerName string
@@ -537,19 +568,21 @@ func (t *Translator) renderResourceComponentPathTemplate(tmpl string, componentN
 		ResourceName:  t.ComponentMaps[componentName].ResourceName,
 		ContainerName: t.ComponentMaps[componentName].ContainerName,
 	}
-	// TODO: address comment
-	// Can extract the template execution part to a common method, so for each
-	// rendering method just need to create a template struct and call this common method
-	tm, err := template.New("").Parse(tmpl)
+	return renderTemplate(tmpl, ts)
+}
+
+// helper method to render template
+func renderTemplate(tmpl string, ts interface{}) (string, error) {
+	t, err := template.New("").Parse(tmpl)
 	if err != nil {
-		return err.Error()
+		return "", err
 	}
 	buf := new(bytes.Buffer)
-	err = tm.Execute(buf, ts)
+	err = t.Execute(buf, ts)
 	if err != nil {
-		return err.Error()
+		return "", err
 	}
-	return buf.String()
+	return buf.String(), nil
 }
 
 // defaultTranslationFunc is the default translation to values. It maps a Go data path into a YAML path.

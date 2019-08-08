@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -238,8 +239,8 @@ func ParseK8sObjectsFromYAMLManifest(manifest string) (K8sObjects, error) {
 	var objects K8sObjects
 
 	for _, yaml := range yamls {
-		if strings.TrimSpace(yaml) == "" {
-			// helm charts sometimes emits blank objects with just a "disabled" comment.
+		yaml = removeNonYAMLLines(yaml)
+		if yaml == "" {
 			continue
 		}
 		o, err := ParseYAMLToK8sObject([]byte(yaml))
@@ -252,6 +253,19 @@ func ParseK8sObjectsFromYAMLManifest(manifest string) (K8sObjects, error) {
 	}
 
 	return objects, nil
+}
+
+func removeNonYAMLLines(yms string) string {
+	out := ""
+	for _, s := range strings.Split(yms, "\n") {
+		if strings.HasPrefix(s, "#") {
+			continue
+		}
+		out += s + "\n"
+	}
+
+	// helm charts sometimes emits blank objects with just a "disabled" comment.
+	return strings.TrimSpace(out)
 }
 
 // JSONManifest returns a JSON representation of K8sObjects os.
@@ -273,6 +287,32 @@ func (os K8sObjects) JSONManifest() (string, error) {
 		if _, err := b.Write(json); err != nil {
 			return "", err
 		}
+	}
+
+	return b.String(), nil
+}
+
+// YAMLManifest returns a YAML representation of K8sObjects os.
+func (os K8sObjects) YAMLManifest() (string, error) {
+	var b bytes.Buffer
+
+	for i, item := range os {
+		if i != 0 {
+			if _, err := b.WriteString("\n\n"); err != nil {
+				return "", err
+			}
+		}
+		ym, err := item.YAML()
+		if err != nil {
+			return "", fmt.Errorf("error building yaml: %v", err)
+		}
+		if _, err := b.Write(ym); err != nil {
+			return "", err
+		}
+		if _, err := b.Write([]byte(YAMLSeparator)); err != nil {
+			return "", err
+		}
+
 	}
 
 	return b.String(), nil
@@ -301,7 +341,9 @@ func (os K8sObjects) Sort(score func(o *K8sObject) int) {
 func (os K8sObjects) ToMap() map[string]*K8sObject {
 	ret := make(map[string]*K8sObject)
 	for _, oo := range os {
-		ret[oo.Hash()] = oo
+		if oo.Valid() {
+			ret[oo.Hash()] = oo
+		}
 	}
 	return ret
 }
@@ -310,29 +352,19 @@ func (os K8sObjects) ToMap() map[string]*K8sObject {
 func (os K8sObjects) ToNameKindMap() map[string]*K8sObject {
 	ret := make(map[string]*K8sObject)
 	for _, oo := range os {
-		ret[oo.HashNameKind()] = oo
+		if oo.Valid() {
+			ret[oo.HashNameKind()] = oo
+		}
 	}
 	return ret
 }
 
-// YAML returns a YAML representation of os, using an internal cache.
-func (os K8sObjects) YAML() (string, error) {
-	var sb strings.Builder
-	for _, o := range os {
-		oy, err := o.YAML()
-		if err != nil {
-			return "", err
-		}
-		_, err = sb.Write(oy)
-		if err != nil {
-			return "", err
-		}
-		_, err = sb.WriteString(YAMLSeparator)
-		if err != nil {
-			return "", err
-		}
+// Valid checks returns true if Kind and Name of K8sObject are both not empty.
+func (o *K8sObject) Valid() bool {
+	if o.Kind == "" || o.Name == "" {
+		return false
 	}
-	return sb.String(), nil
+	return true
 }
 
 func ManifestDiff(a, b string) (string, error) {
@@ -357,8 +389,8 @@ func ManifestDiff(a, b string) (string, error) {
 		}
 		diff := util.YAMLDiff(string(ay), string(by))
 		if diff != "" {
-			writeStringSafe(sb, "\n\nObject "+ak+" has diffs:\n\n")
-			writeStringSafe(sb, diff)
+			writeStringSafe(&sb, "\n\nObject "+ak+" has diffs:\n\n")
+			writeStringSafe(&sb, diff)
 		}
 	}
 	for bk, bv := range bom {
@@ -369,15 +401,15 @@ func ManifestDiff(a, b string) (string, error) {
 			}
 			diff := util.YAMLDiff(string(by), "")
 			if diff != "" {
-				writeStringSafe(sb, "\n\nObject "+bk+" is missing:\n\n")
-				writeStringSafe(sb, diff)
+				writeStringSafe(&sb, "\n\nObject "+bk+" is missing:\n\n")
+				writeStringSafe(&sb, diff)
 			}
 		}
 	}
 	return sb.String(), err
 }
 
-func writeStringSafe(sb strings.Builder, s string) {
+func writeStringSafe(sb io.StringWriter, s string) {
 	_, err := sb.WriteString(s)
 	if err != nil {
 		log.Error(err.Error())

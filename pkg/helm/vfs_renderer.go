@@ -22,6 +22,7 @@ import (
 	"k8s.io/helm/pkg/chartutil"
 	"k8s.io/helm/pkg/proto/hapi/chart"
 
+	"istio.io/operator/pkg/util"
 	"istio.io/operator/pkg/vfsgen"
 
 	"istio.io/pkg/log"
@@ -64,7 +65,7 @@ type VFSRenderer struct {
 // NewVFSRenderer creates a VFSRenderer with the given relative path to helm charts, component name and namespace and
 // a base values YAML string.
 func NewVFSRenderer(helmChartDirPath, valuesYAML, componentName, namespace string) *VFSRenderer {
-	log.Infof("NewVFSRenderer with helmChart=%s, componentName=%s", helmChartDirPath, componentName)
+	log.Infof("NewVFSRenderer with helmChart=%s, componentName=%s, namespace=%s", helmChartDirPath, componentName, namespace)
 	return &VFSRenderer{
 		namespace:        namespace,
 		componentName:    componentName,
@@ -75,7 +76,7 @@ func NewVFSRenderer(helmChartDirPath, valuesYAML, componentName, namespace strin
 
 // Run implements the TemplateRenderer interface.
 func (h *VFSRenderer) Run() error {
-	log.Infof("Run FileTemplateRenderer with helmChart=%s, componentName=%s", h.helmChartDirPath, h.componentName)
+	log.Infof("Run VFSRenderer with helmChart=%s, componentName=%s, namespace=%s", h.helmChartDirPath, h.componentName, h.namespace)
 	if err := h.loadChart(); err != nil {
 		return err
 	}
@@ -144,4 +145,9 @@ func stripPrefix(path, prefix string) string {
 	pl := len(strings.Split(prefix, "/"))
 	pv := strings.Split(path, "/")
 	return strings.Join(pv[pl:], "/")
+}
+
+// list all the builtin profiles.
+func ListBuiltinProfiles() []string {
+	return util.StringBoolMapToSlice(ProfileNames)
 }
