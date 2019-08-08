@@ -15,6 +15,7 @@
 package multi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -25,6 +26,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"k8s.io/client-go/tools/clientcmd/api/latest"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -376,7 +379,7 @@ func GetJoinCommand(args *Args) *cobra.Command {
 					fmt.Printf("joining %v to %v\n", src, dst)
 
 					// local CLUSTER_NAME=$($KUBECTL_SLAVE config view -o jsonpath="{.contexts[?(@.name == \"${KUBECONTEXT_SLAVE}\")].context.cluster}")
-					clusterName := config.Contexts[dst].Cluster
+					clusterName := config.Contexts[src].Cluster
 
 					// local SERVER=$($KUBECTL_SLAVE config view -o jsonpath="{.clusters[?(@.name == \"${CLUSTER_NAME}\")].cluster.server}")
 					server := config.Clusters[clusterName].Server
@@ -439,6 +442,11 @@ func GetJoinCommand(args *Args) *cobra.Command {
 						Token: string(token),
 					}
 
+					var kubeconfig bytes.Buffer
+					if err := latest.Codec.Encode(sc, &kubeconfig); err != nil {
+						log.Fatal(err)
+					}
+
 					srcSecret := &v1.Secret{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      fmt.Sprintf("istio-mc-%v", src),
@@ -447,8 +455,15 @@ func GetJoinCommand(args *Args) *cobra.Command {
 								"istio/multiCluster": "true",
 							},
 						},
+						StringData: map[string]string{
+							// NOTE: The `src` key must be unique for all pilot SA secrets
+							src: kubeconfig.String(),
+						},
 					}
 
+					// TODO: consider UPDATE instead of PATCH? We can configure multiple remote clusters with a single
+					// secret. Each `key` in the secret represents a cluster. This can be encoded in a single secret
+					// or spread across secrets. The `key` must be unique per-pilot / mesh.
 					if result, err := dstKube.CoreV1().Secrets(namespace).Create(srcSecret); errors.IsAlreadyExists(err) {
 						fmt.Println("secret exists:", result)
 
