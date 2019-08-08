@@ -15,7 +15,7 @@
 package multi
 
 import (
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -25,6 +25,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
@@ -60,7 +63,7 @@ func BuildClientConfig(kubeconfig, context string) clientcmd.ClientConfig {
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
 }
 
-type args struct {
+type Args struct {
 	kubeconfig string
 	context    string
 	clusters   []string
@@ -75,7 +78,7 @@ type args struct {
 // join clusters in the same flat network
 // iop multi join --clusters=c0,c1,c2
 
-func GetListCommand(args *args) *cobra.Command {
+func GetListCommand(args *Args) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "list available clusters",
@@ -120,7 +123,7 @@ users:
     token: ${TOKEN}
 `
 
-func GetJoinCommand(args *args) *cobra.Command {
+func GetJoinCommand(args *Args) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "join",
 		Short: "Join clusters together in a mesh",
@@ -179,8 +182,8 @@ func GetJoinCommand(args *args) *cobra.Command {
 					os.Exit(1)
 				}
 
-				// c0 := csm[args.clusters[0]]
-				// c1 := csm[args.clusters[1]]
+				// c0 := csm[Args.clusters[0]]
+				// c1 := csm[Args.clusters[1]]
 
 				// FLAT_NETWORK
 
@@ -343,13 +346,19 @@ func GetJoinCommand(args *args) *cobra.Command {
 			}
 			// create k8s secret with c0 pilot SA kubeconfig, label, and copy to c1
 			// create k8s secret with c1 pilot SA kubeconfig, label, and copy to c0
-			config, err := args.config.ConfigAccess().GetStartingConfig()
-			if err != nil {
-				log.Fatal(err)
-			}
 
 			// TODO - multiple kubeconfig context may point to the same cluster.
 			for _, dst := range args.clusters {
+				dstRest, err := BuildClientConfig(args.kubeconfig, dst).ClientConfig()
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				dstKube, err := kubernetes.NewForConfig(dstRest)
+				if err != nil {
+					log.Fatal(err)
+				}
+
 				for _, src := range args.clusters {
 					// skip self
 					if src == dst {
@@ -361,7 +370,7 @@ func GetJoinCommand(args *args) *cobra.Command {
 					clusterName := config.Contexts[dst].Cluster
 
 					// local SERVER=$($KUBECTL_SLAVE config view -o jsonpath="{.clusters[?(@.name == \"${CLUSTER_NAME}\")].cluster.server}")
-					server := config.Clusters[dst].Server
+					server := config.Clusters[clusterName].Server
 
 					// local NAMESPACE=istio-system
 					namespace := "istio-system"
@@ -369,7 +378,7 @@ func GetJoinCommand(args *args) *cobra.Command {
 					// local SERVICE_ACCOUNT=istio-pilot-service-account
 					serviceAccountName := "istio-pilot-service-account"
 
-					srcRest, err := BuildClientConfig(args.kubeconfig, args.context).ClientConfig()
+					srcRest, err := BuildClientConfig(args.kubeconfig, src).ClientConfig()
 					if err != nil {
 						log.Fatal(err)
 					}
@@ -380,7 +389,7 @@ func GetJoinCommand(args *args) *cobra.Command {
 					}
 
 					// local SECRET_NAME=$($KUBECTL_SLAVE get sa ${SERVICE_ACCOUNT} -n ${NAMESPACE} -o jsonpath="{.secrets[].name}")
-					serviceAccount, err := srcKube.Core().ServiceAccounts(namespace).Get(serviceAccountName, metav1.GetOptions{})
+					serviceAccount, err := srcKube.CoreV1().ServiceAccounts(namespace).Get(serviceAccountName, metav1.GetOptions{})
 					if err != nil {
 						log.Fatal(err)
 					}
@@ -390,7 +399,7 @@ func GetJoinCommand(args *args) *cobra.Command {
 					secretName := serviceAccount.Secrets[0].Name
 
 					// local CA_DATA=$($KUBECTL_SLAVE get secret ${SECRET_NAME} -n ${NAMESPACE} -o jsonpath="{.data['ca\.crt']}")
-					pilotSecret, err := srcKube.Core().Secrets(namespace).Get(secretName, metav1.GetOptions{})
+					pilotSecret, err := srcKube.CoreV1().Secrets(namespace).Get(secretName, metav1.GetOptions{})
 					if err != nil {
 						log.Fatal(err)
 					}
@@ -403,12 +412,6 @@ func GetJoinCommand(args *args) *cobra.Command {
 					token, ok := pilotSecret.Data["token"]
 					if !ok {
 						log.Fatalf("%v is missing token", secretName)
-					}
-
-					decodedToken := make([]byte, base64.StdEncoding.DecodedLen(len(token)))
-					_, err := base64.StdEncoding.Decode(decodedToken, token)
-					if err != nil {
-						log.Fatal(err)
 					}
 
 					sc := api.NewConfig()
@@ -424,10 +427,10 @@ func GetJoinCommand(args *args) *cobra.Command {
 					}
 					sc.CurrentContext = clusterName
 					sc.AuthInfos[clusterName] = &api.AuthInfo{
-						Token: string(decodedToken),
+						Token: string(token),
 					}
 
-					srcSecret := v1.Secret{
+					srcSecret := &v1.Secret{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      fmt.Sprintf("istio-mc-%v", src),
 							Namespace: namespace,
@@ -435,6 +438,19 @@ func GetJoinCommand(args *args) *cobra.Command {
 								"istio/multiCluster": "true",
 							},
 						},
+					}
+
+					if result, err := dstKube.CoreV1().Secrets(namespace).Create(srcSecret); errors.IsAlreadyExists(err) {
+						fmt.Println("secret exists:", result)
+
+						patch, err := json.Marshal(srcSecret)
+						if err != nil {
+							log.Fatal(err)
+						}
+
+						res, err := dstKube.CoreV1().Secrets(namespace).Patch(srcSecret.Name, types.StrategicMergePatchType, patch)
+						fmt.Println("PATCH: err: ", err)
+						fmt.Println("PATCH: result: ", res)
 					}
 				}
 			}
@@ -447,7 +463,7 @@ func GetJoinCommand(args *args) *cobra.Command {
 }
 
 func GetCommand() *cobra.Command {
-	var args args
+	var args Args
 
 	cmd := &cobra.Command{
 		Use:   "multi",
